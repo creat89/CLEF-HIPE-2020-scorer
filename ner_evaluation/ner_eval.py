@@ -370,7 +370,6 @@ class Evaluator:
 
         # keep track of entities that overlapped
         true_which_overlapped_with_pred = []
-        true_which_matched_exactly_with_pred = []
 
         # Subset into only the tags that we are interested in.
         # NOTE: we remove the tags we don't want from both the predicted and the
@@ -398,7 +397,6 @@ class Evaluator:
             for true in true_named_entities:
                 if any(p == true for p in pred):
                     true_which_overlapped_with_pred.append(true)
-                    true_which_matched_exactly_with_pred.append(true)
                     evaluation["strict"]["correct"] += 1
                     evaluation["ent_type"]["correct"] += 1
                     evaluation["exact"]["correct"] += 1
