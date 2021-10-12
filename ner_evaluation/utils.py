@@ -318,7 +318,7 @@ def collect_link_objects_ner(tokens, link_cols, ner_cols, n_best=1, gs=False):
     end_offset = None
     ent_type = None
     ner_type = None
-    span_text = ""
+    span_text = []
 
     if len(link_cols) > 1 and n_best > 1:
         msg = (
@@ -336,11 +336,12 @@ def collect_link_objects_ner(tokens, link_cols, ner_cols, n_best=1, gs=False):
         if token_ner_tag == "O":
             if ent_type is not None and start_offset is not None:
                 end_offset = offset - 1
-                links.append(Entity(ent_type, start_offset, end_offset, span_text))
+                links.append(Entity(ent_type, start_offset, end_offset, " ".join(span_text)))
                 start_offset = None
                 end_offset = None
                 ent_type = None
                 ner_type = None
+                span_text = []
             if token_link_tag not in ("_", "-"):
                 links.append(Entity(token_link_tag, offset, offset, token.TOKEN))
 
@@ -351,7 +352,7 @@ def collect_link_objects_ner(tokens, link_cols, ner_cols, n_best=1, gs=False):
             ent_type = token_link_tag
             ner_type = token_ner_tag[2:]
             start_offset = offset
-            span_text = ""
+            span_text = []
 
         #Start of a new nel object but still within the same ner object
         elif ner_type == token_ner_tag[2:] and token_ner_tag[:1] == "I" and ent_type != token_link_tag:
@@ -362,33 +363,33 @@ def collect_link_objects_ner(tokens, link_cols, ner_cols, n_best=1, gs=False):
                 logging.warning(msg)
 
                 end_offset = offset - 1
-                links.append(Entity(ent_type, start_offset, end_offset, span_text))
+                links.append(Entity(ent_type, start_offset, end_offset, " ".join(span_text)))
 
                 # start of a new entity
                 ent_type = token_link_tag
                 ner_type = token_ner_tag[2:]
                 start_offset = offset
                 end_offset = None
-                span_text = ""
+                span_text = []
 
             logging.warning(msg)
 
         elif ner_type != token_ner_tag[2:] or (ner_type == token_ner_tag[2:] and token_ner_tag[:1] == "B"):
             end_offset = offset - 1
-            links.append(Entity(ent_type, start_offset, end_offset, span_text))
+            links.append(Entity(ent_type, start_offset, end_offset, " ".join(span_text)))
 
             # start of a new entity
             ent_type = token_link_tag
             ner_type = token_ner_tag[2:]
             start_offset = offset
             end_offset = None
-            span_text = ""
+            span_text = []
 
-        span_text += token.TOKEN
+        span_text.append(token.TOKEN)
 
     # catches an entity that goes up until the last token
     if ent_type and start_offset is not None and end_offset is None:
-        links.append(Entity(ent_type, start_offset, len(tokens) - 1, span_text))
+        links.append(Entity(ent_type, start_offset, len(tokens) - 1, " ".join(span_text)))
 
     # allow alternative annotations with the same on/offset as the primary one
     links_union = []
