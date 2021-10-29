@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class Evaluator:
-    def __init__(self, f_true, f_pred, glueing_cols=None):
+    def __init__(self, f_true, f_pred, glueing_cols=None, output_for_stat=False):
         """
         An Evaluator evalatues the system response according to the
         gold standard.
@@ -41,11 +41,14 @@ class Evaluator:
         :param str f_true: file name of the gold standard (CLEF tsv-format).
         :param str f_pred: file name of the system response (CLEF tsv-format).
         :param list glueing_cols: concat the annotation of two columns (list with tuples).
+        :param bool output_for_stat: indicate if generate output for stat test
         :return: Evaluator object.
 
         """
 
         logging.info(f"Reading system response file '{f_pred}' and gold standard '{f_true}'.")
+
+        self.output_for_stat = output_for_stat
 
         self.f_true = f_true
         self.f_pred = f_pred
@@ -221,6 +224,9 @@ class Evaluator:
         results = deepcopy(self.metric_schema)
         results_per_type = defaultdict(lambda: deepcopy(self.metric_schema))
 
+        # Output for stats
+        all_stat_matches = []
+
         # Iterate document-wise
         for y_true_doc, y_pred_doc in zip(self.true, self.pred):
 
@@ -249,17 +255,17 @@ class Evaluator:
                 # Compute result for one segment
                 if eval_type == "nerc":
 
-                    seg_results, seg_results_per_type = self.compute_metrics(
+                    seg_results, seg_results_per_type, stat_matches = self.compute_metrics(
                         collect_named_entities(y_true_seg, columns),
                         collect_named_entities(y_pred_seg, columns),
-                        tags,
+                        tags, len(y_true_seg)
                     )
 
                 elif eval_type == "nel":
-                    seg_results, seg_results_per_type = self.compute_metrics(
+                    seg_results, seg_results_per_type, stat_matches = self.compute_metrics(
                         collect_link_objects(y_true_seg, columns, additional_columns, gs=True),
                         collect_link_objects(y_pred_seg, columns, additional_columns, n_best),
-                        tags,
+                        tags, len(y_true_seg)
                     )
 
                 # accumulate overall stats
@@ -284,7 +290,7 @@ class Evaluator:
             # Compute document-level metrics across entity types
             doc_results = compute_precision_recall_wrapper(doc_results)
             results = self.accumulate_doc_scores(results, doc_results)
-
+            all_stat_matches.extend(stat_matches)
         # Compute overall metrics by entity type
         for e_type in results_per_type:
             results_per_type[e_type] = compute_precision_recall_wrapper(results_per_type[e_type])
@@ -295,7 +301,9 @@ class Evaluator:
         results = compute_macro_doc_scores(results)
         results = compute_macro_type_scores(results, results_per_type)
 
-        return results, results_per_type
+        if len(all_stat_matches) == 0:
+            all_stat_matches = None
+        return results, results_per_type, all_stat_matches
 
     def accumulate_doc_scores(self, results, doc_results):
         """Accumulate the scores (P, R, F1) across documents.
@@ -351,12 +359,13 @@ class Evaluator:
 
         return results, results_per_type
 
-    def compute_metrics(self, true_named_entities: list, pred_named_entities: list, tags: set):
+    def compute_metrics(self, true_named_entities: list, pred_named_entities: list, tags: set, gs_tokens_number: int):
         """Compute the metrics of segment for all evaluation scenarios.
 
         :param list(Entity) true_named_entities: nested list with entity annotations of gold standard.
         :param list(Entity) pred_named_entities: nested list with entity annotations of system response.
         :param set tags: limit to provided tags.
+        :param int gs_tokens_number: the number of tokens in the gold standard
         :return: nested results and results per entity type
         :rtype: Tuple(dict, dict)
 
@@ -368,8 +377,12 @@ class Evaluator:
         # results by entity type
         evaluation_agg_entities_type = defaultdict(lambda: deepcopy(self.metric_schema))
 
-        # keep track of entities that overlapped
+        # keep track of entities that overlapped, matched and created
         true_which_overlapped_with_pred = []
+        true_which_match_exactly_with_pred = []
+        pred_entities_which_dont_match = []
+
+        stat_matches = []
 
         # Subset into only the tags that we are interested in.
         # NOTE: we remove the tags we don't want from both the predicted and the
@@ -397,6 +410,7 @@ class Evaluator:
             for true in true_named_entities:
                 if any(p == true for p in pred):
                     true_which_overlapped_with_pred.append(true)
+                    true_which_match_exactly_with_pred.append(true)
                     evaluation["strict"]["correct"] += 1
                     evaluation["ent_type"]["correct"] += 1
                     evaluation["exact"]["correct"] += 1
@@ -411,7 +425,7 @@ class Evaluator:
                     break
 
             else:
-
+                pred_entities_which_dont_match.append(pred)
                 # check for overlaps with any of the true entities
                 for true in true_named_entities:
 
@@ -538,9 +552,44 @@ class Evaluator:
                         evaluation_agg_entities_type[true]["partial"]["spurious"] += 1
                         evaluation_agg_entities_type[true]["exact"]["spurious"] += 1
 
-        # Scenario III: Entity was missed entirely.
+        # Scenario III: Entity was missed entirely. And indicates the matches for a strict statistical test
+        if len(pred_entities_which_dont_match) > 0:
+            missed = pred_entities_which_dont_match.pop(0)[0]
+        else:
+            missed = None
+        start_offset = 0
 
         for true in true_named_entities:
+            if self.output_for_stat:
+                correct_match = True
+                for i in range(start_offset, true.start_offset):
+                    if missed is not None:
+                        if i > missed.end_offset:
+                            if len(pred_entities_which_dont_match) > 0:
+                                missed = pred_entities_which_dont_match.pop(0)[0]
+                            else:
+                                missed = None
+                            correct_match = True
+                        if missed is not None and missed.start_offset <= i <= missed.end_offset:
+                            correct_match = False
+                    if correct_match is True:
+                        stat_matches.append({"Token": "", "Match": correct_match})
+                        #print(f"?\t{correct_match}")
+                    else:
+                        stat_matches.append({"Token": missed.span_text, "Match": correct_match})
+                        #print(f"{missed.span_text}\t{correct_match}")
+                if true in true_which_match_exactly_with_pred:
+                    #print(f"{true.span_text}\t{True}")
+                    stat_matches.append({"Token": true.span_text, "Match": True})
+                else:
+                    stat_matches.append({"Token": true.span_text, "Match": False})
+                    #print(f"{true.span_text}\t{False}")
+                start_offset = true.end_offset + 1
+                if missed is not None and start_offset > missed.end_offset:
+                    if len(pred_entities_which_dont_match) > 0:
+                        missed = pred_entities_which_dont_match.pop(0)[0]
+                    else:
+                        missed = None
             if true not in true_which_overlapped_with_pred:
                 # overall results
                 evaluation["strict"]["missed"] += 1
@@ -555,6 +604,25 @@ class Evaluator:
                 evaluation_agg_entities_type[true.e_type]["ent_type"]["missed"] += 1
                 evaluation_agg_entities_type[true.e_type]["partial"]["missed"] += 1
                 evaluation_agg_entities_type[true.e_type]["exact"]["missed"] += 1
+
+        if self.output_for_stat:
+            correct_match = True
+            for i in range(start_offset, gs_tokens_number):
+                if missed is not None:
+                    if i > missed.end_offset:
+                        if len(pred_entities_which_dont_match) > 0:
+                            missed = pred_entities_which_dont_match.pop(0)[0]
+                        else:
+                            missed = None
+                        correct_match = True
+                    if missed is not None and missed.start_offset <= i <= missed.end_offset:
+                        correct_match = False
+                if correct_match is True:
+                    stat_matches.append({"Token": "", "Match": correct_match})
+                    # print(f"?\t{correct_match}")
+                else:
+                    stat_matches.append({"Token": missed.span_text, "Match": correct_match})
+                    # print(f"{missed.span_text}\t{correct_match}")
 
         # Compute 'possible', 'actual' according to SemEval-2013 Task 9.1 on the
         # overall results, and use these to calculate precision and recall.
@@ -574,7 +642,7 @@ class Evaluator:
                     entity_level[eval_type]
                 )
 
-        return evaluation, evaluation_agg_entities_type
+        return evaluation, evaluation_agg_entities_type, stat_matches
 
     def set_evaluation_tags(self, columns, tags, eval_type):
 

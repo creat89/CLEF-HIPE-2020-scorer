@@ -20,6 +20,7 @@ Options:
     -o --outdir=<dir>       Path to output directory [default: .].
     -l --log=<fpath>        Path to log file.
     -g --original_nel       It splits the NEL boundaries using original CLEF algorithm.
+    -s --stat_output        It produces output based on the strict matching for doing statistical tests
     -n, --n_best=<n>        Evaluate NEL at particular cutoff value(s) when provided with a ranked list of entity links. Example: 1,3,5 [default: 1].
     --noise-level=<str>     Evaluate NEL or NERC also on particular noise levels (normalized Levenshtein distance of their manual OCR transcript). Example: 0.0-0.1,0.1-1.0,
     --time-period=<str>     Evaluate NEL or NERC also on particular time periods. Example: 1900-1950,1950-2000.
@@ -100,7 +101,7 @@ def evaluation_wrapper(
         additional_col = None
         if additional_cols is not None:
             additional_col = additional_cols[col_id]
-        eval_global, eval_per_tag = evaluator.evaluate(
+        eval_global, eval_per_tag, stat_matches = evaluator.evaluate(
             col,
             eval_type=eval_type,
             merge_lines=True,
@@ -117,8 +118,48 @@ def evaluation_wrapper(
         # add aggregated stats across types as artificial tag
         results[col][time_period][noise_level] = eval_per_tag
         results[col][time_period][noise_level]["ALL"] = eval_global
+        results[col][time_period][noise_level]["FOR_STATS"] = stat_matches
 
     return results
+
+def search_stat_data(eval_stats, levels):
+    keys = eval_stats.keys()
+    found = False
+    for key in keys:
+        if key == "FOR_STATS":
+            found = True
+    if not found:
+        for key in keys:
+
+            found, new_levels = search_stat_data(eval_stats[key], [])
+            if found:
+                if len(new_levels) == 0:
+                    levels.append([key])
+                else:
+                    for new_level in new_levels:
+                        local_levels = [key]
+                        local_levels.extend(new_level)
+                        levels.append(local_levels)
+            else:
+                logging.error("Field not found in eval: FOR_STATS")
+    return found, levels
+
+
+def get_stat_data(eval_stats, path_to_follow):
+    if len(path_to_follow) == 0:
+        return eval_stats["FOR_STATS"]
+    else:
+        key = path_to_follow.pop(0)
+        return get_stat_data(eval_stats[key], path_to_follow)
+
+
+
+def remove_stat_data(eval_stats, path_to_follow):
+    if len(path_to_follow) == 0:
+        del eval_stats["FOR_STATS"]
+    else:
+        key = path_to_follow.pop(0)
+        get_stat_data(eval_stats[key], path_to_follow)
 
 
 def get_results(
@@ -134,6 +175,7 @@ def get_results(
     noise_levels: list = [None],
     time_periods: list = [None],
     original_nel: bool = False,
+    output_for_stat: bool = False
 ):
 
     if not skip_check:
@@ -154,7 +196,9 @@ def get_results(
     else:
         tagset = None
 
-    evaluator = Evaluator(f_ref, f_pred, glueing_col_pairs)
+    evaluator = Evaluator(f_ref, f_pred, glueing_col_pairs, output_for_stat=output_for_stat)
+
+    eval_stats = {}
 
     if task in ("nerc_fine", "nerc_coarse"):
         columns = FINE_COLUMNS if task == "nerc_fine" else COARSE_COLUMNS
@@ -210,6 +254,16 @@ def get_results(
         writer = csv.DictWriter(csvfile, delimiter="\t", fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+    # Write output for stat test
+    if output_for_stat:
+        _, paths_to_follow = search_stat_data(eval_stats, [])
+        for path_to_follow in paths_to_follow:
+            f_stat = str(pathlib.Path(outdir) / f_sub.name.replace(".tsv", f"_{task}{suffix}_{'_'.join(map(str, path_to_follow))}.stat"))
+            stat_data = get_stat_data(eval_stats, path_to_follow)
+            with open(f_stat, "w") as csvfile:
+                for element in stat_data:
+                    csvfile.write(f"{element['Token']}\t{element['Match']}\n")
 
     # write detailed results to json
     with open(f_json, "w") as jsonfile:
@@ -296,6 +350,8 @@ def assemble_tsv_output(
             # collect only aggregated metrics
             if only_aggregated and tag != "ALL":
                 continue
+            if tag == "FOR_STATS":
+                continue
 
             results = {}
             results["System"] = submission
@@ -343,6 +399,7 @@ def main(args):
     skip_check = args["--skip-check"]
     f_tagset = args["--tagset"]
     suffix = args["--suffix"]
+    output_for_stat = args["--stat_output"]
 
     # log to file
     logging.basicConfig(
@@ -403,6 +460,7 @@ def main(args):
             noise_levels,
             time_periods,
             original_nel,
+            output_for_stat,
         )
     except AssertionError as e:
         # don't interrupt the pipeline
